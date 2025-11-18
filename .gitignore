@@ -1,0 +1,24 @@
+# Build directories
+build/
+*.o
+*.o.d
+
+# VS Code
+.vscode/
+!.vscode/c_cpp_properties.json
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Executables
+s3_project
+uart_comm
+uart_pubsub
+
+# IDE
+*.swp
+*.swo
+*~
