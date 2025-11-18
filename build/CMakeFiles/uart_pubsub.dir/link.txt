@@ -1,0 +1,1 @@
+/usr/bin/clang++-19 CMakeFiles/uart_pubsub.dir/src/uart_pubsub_main.cpp.o CMakeFiles/uart_pubsub.dir/src/uart_broker_impl.cpp.o CMakeFiles/uart_pubsub.dir/src/uart_message_impl.cpp.o CMakeFiles/uart_pubsub.dir/src/uart_comm_impl.cpp.o -o uart_pubsub  -lpthread 

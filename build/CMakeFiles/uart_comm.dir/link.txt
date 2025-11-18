@@ -1,0 +1,1 @@
+/usr/bin/clang++-19 CMakeFiles/uart_comm.dir/src/uart_main.cpp.o CMakeFiles/uart_comm.dir/src/uart_comm_impl.cpp.o -o uart_comm 
