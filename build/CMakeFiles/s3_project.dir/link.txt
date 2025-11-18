@@ -1,1 +1,0 @@
-/usr/bin/clang++-19 CMakeFiles/s3_project.dir/src/main.cpp.o -o s3_project 

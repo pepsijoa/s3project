@@ -1,3 +1,0 @@
-/home/kkw/s3_project/build/CMakeFiles/uart_pubsub.dir
-/home/kkw/s3_project/build/CMakeFiles/edit_cache.dir
-/home/kkw/s3_project/build/CMakeFiles/rebuild_cache.dir
