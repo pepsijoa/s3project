@@ -1,7 +1,6 @@
 # UART 기반 Pub/Sub 메시징 시스템
 
 ## 개요
-**인터넷 없이** 
 일단은 UART를 통해 MQTT 프로토콜 구현함.
 copliot 최고
 
