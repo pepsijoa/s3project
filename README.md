@@ -2,9 +2,11 @@
 
 ## 개요
 일단은 UART를 통해 MQTT 프로토콜 구현함.
-copliot 최고
 
-아래에 7번 전체 타임라인을 확인하면, 실행 순서 파악 가능함.
+
+전체 타임라인을 확인하면, 실행 순서 파악 가능.
+
+motor.ino 코드의 processMessages()의 시작 지점의 Serial2 대신에 DWM으로 받아온 recvBuffer 데이터로 바꾸면 될 것 같음.
 
 ## 프로토콜 구조
 
@@ -126,133 +128,9 @@ broker.subscribe("status/error", callback);
 - 단방향/양방향 통신 모두 지원
 - CRC 실패 시 메시지 자동 폐기
 
-## 아두이노 연동
+## 1. 메시지 송수신 흐름
 
-아두이노도 동일한 프로토콜을 구현하면 통신 가능합니다.
-별도의 아두이노 라이브러리 작성 필요.
-
-
-
-# UART 기반 Pub/Sub 시스템 - 전체 실행 순서
-
-## 시스템 개요
-
-```
-┌─────────────────┐         UART (GPIO 14/15)        ┌─────────────────┐
-│  라즈베리파이    │ ◄────────────────────────────► │    아두이노      │
-│  (Publisher +   │    토픽 기반 메시지 교환          │   (Subscriber +  │
-│   Subscriber)   │    QoS 1, CRC16 검증            │    Publisher)    │
-└─────────────────┘                                 └─────────────────┘
-```
-
-## 1. 하드웨어 연결
-
-### 라즈베리파이 ↔ 아두이노
-```
-라즈베리파이          아두이노
-GPIO 14 (TX)  ----->  RX (Pin 0)
-GPIO 15 (RX)  <-----  TX (Pin 1)
-GND           ----->  GND
-```
-
-⚠️ **주의**: 레벨 시프터 권장 (라즈베리파이 3.3V, 아두이노 5V)
-
----
-
-## 2. 라즈베리파이 설정
-
-### 2.1 UART 활성화
-```bash
-sudo raspi-config
-```
-- Interface Options → Serial Port
-- "로그인 셸 사용" → **No**
-- "시리얼 포트 하드웨어" → **Yes**
-- 재부팅
-
-### 2.2 시리얼 콘솔 비활성화
-```bash
-sudo systemctl stop serial-getty@ttyS0.service
-sudo systemctl disable serial-getty@ttyS0.service
-```
-
-### 2.3 빌드
-```bash
-cd /home/kkw/s3_project/build
-cmake ..
-make
-```
-
----
-
-## 3. 아두이노 설정
-
-### 3.1 코드 업로드
-1. `arduino_pubsub.ino` 파일을 아두이노 IDE로 열기
-2. 보드 선택 (예: Arduino Uno)
-3. 포트 선택
-4. 업로드
-
-### 3.2 구독 토픽 설정 (setup 함수)
-```cpp
-void setup() {
-  Serial.begin(9600);
-  
-  // 구독할 토픽 설정 (최대 5개)
-  subscribe("sensor/temperature");
-  subscribe("sensor/humidity");
-  subscribe("command/led");
-  
-  pinMode(LED_BUILTIN, OUTPUT);
-}
-```
-
-### 3.3 TX/RX 연결
-⚠️ 업로드 **후에** TX/RX 핀을 라즈베리파이에 연결
-
----
-
-## 4. 실행 순서
-
-### Step 1: 아두이노 시작
-```
-[아두이노 전원 ON]
-  ↓
-Serial.begin(9600) - UART 초기화
-  ↓
-subscribe() 호출 - 토픽 등록
-  ↓
-loop() 시작
-  ↓
-processMessages() 대기 - 수신 대기 모드
-```
-
-### Step 2: 라즈베리파이 시작
-```bash
-cd /home/kkw/s3_project/build
-sudo ./uart_pubsub
-```
-
-```
-[프로그램 시작]
-  ↓
-uart.init(9600) - UART 초기화
-  ↓
-broker.subscribe() - 토픽 구독 등록
-  ├─ "sensor/temperature"
-  ├─ "sensor/humidity"
-  └─ "command/led"
-  ↓
-loop 시작
-  ├─ processMessages() - 수신 처리
-  └─ publish() - 메시지 발행
-```
-
----
-
-## 5. 메시지 송수신 흐름
-
-### 5.1 라즈베리파이 → 아두이노 (Publish)
+### 1.1 라즈베리파이 → 아두이노 (Publish)
 
 ```
 [라즈베리파이]
@@ -297,7 +175,7 @@ loop 시작
   "[BROKER] ACK 수신: 메시지 ID XXX"
 ```
 
-### 5.2 아두이노 → 라즈베리파이 (Publish)
+### 1.2 아두이노 → 라즈베리파이 (Publish)
 
 ```
 [아두이노]
@@ -343,7 +221,7 @@ loop 시작
 
 ---
 
-## 6. 실행 후 동작
+## 2. 실행 후 동작
 
 ### 라즈베리파이 출력 예시
 ```
@@ -375,7 +253,7 @@ UART 초기화 완료 (보드레이트: 9600)
 
 ---
 
-## 7. 전체 타임라인
+## 3. 전체 타임라인
 
 ```
 시간    라즈베리파이                          아두이노
@@ -407,131 +285,7 @@ UART 초기화 완료 (보드레이트: 9600)
 
 ---
 
-## 8. QoS 1 동작 과정
-
-```
-[발신측]
-  1. publish() 호출
-  2. message_id 생성
-  3. 메시지 전송
-  4. pending_acks[message_id] 저장
-  5. ACK 대기...
-  
-[수신측]
-  1. 메시지 수신
-  2. CRC 검증
-  3. handlePublish() 실행
-  4. sendAck(message_id)
-  
-[발신측]
-  1. ACK 수신
-  2. pending_acks[message_id] 제거
-  3. 전송 완료 ✓
-```
-
----
-
-## 9. 주요 함수 호출 순서
-
-### 라즈베리파이
-```cpp
-main()
-  └─ broker.init(9600)
-      └─ uart.init()
-          └─ open("/dev/serial0")
-          └─ tcsetattr() // UART 설정
-  
-  └─ broker.subscribe("topic", callback)
-      └─ subscribers[topic].push_back(callback)
-  
-  └─ while(running)
-      ├─ broker.processMessages()
-      │   └─ uart.receiveData()
-      │   └─ find START/END
-      │   └─ UARTMessage::deserialize()
-      │   └─ handleMessage()
-      │       └─ sendAck() (QoS 1)
-      │       └─ callback(msg)
-      │
-      └─ broker.publish("topic", data)
-          └─ UARTMessage::serialize()
-          └─ uart.sendData()
-          └─ pending_acks[id] 저장
-```
-
-### 아두이노
-```cpp
-setup()
-  └─ Serial.begin(9600)
-  └─ subscribe("topic")
-      └─ subscribedTopics[] 저장
-
-loop()
-  ├─ processMessages()
-  │   └─ Serial.read()
-  │   └─ find START/END
-  │   └─ parseMessage()
-  │   └─ handlePublish()
-  │       └─ isSubscribed() 확인
-  │       └─ sendAck() (QoS 1)
-  │       └─ 토픽별 처리
-  │
-  └─ publish("topic", data)
-      └─ 메시지 직렬화
-      └─ calculateCRC16()
-      └─ Serial.write()
-```
-
----
-
-## 10. 테스트 시나리오
-
-### 시나리오 1: LED 제어
-1. 라즈베리파이: `broker.publish("command/led", {1})`
-2. 아두이노: 메시지 수신 → LED ON
-3. 아두이노: ACK 전송
-4. 라즈베리파이: ACK 수신 확인
-
-### 시나리오 2: 센서 데이터 전송
-1. 아두이노: `publish("sensor/temp", "23C")`
-2. 라즈베리파이: 메시지 수신 → 콜백 실행
-3. 라즈베리파이: ACK 전송
-4. 아두이노: ACK 수신 확인
-
-### 시나리오 3: 양방향 통신
-1. 라즈베리파이 → 아두이노: 명령 전송
-2. 아두이노: 명령 실행
-3. 아두이노 → 라즈베리파이: 상태 보고
-4. 라즈베리파이: 상태 확인
-
----
-
-## 11. 문제 해결
-
-### UART 장치를 열 수 없음
-```bash
-sudo systemctl stop serial-getty@ttyS0.service
-sudo systemctl disable serial-getty@ttyS0.service
-```
-
-### 메시지 수신 안 됨
-- TX/RX 핀 연결 확인 (크로스 연결)
-- GND 공통 연결 확인
-- 보드레이트 일치 확인 (9600)
-
-### CRC 오류
-- 케이블 품질 확인
-- 노이즈 차폐 확인
-- 전원 안정성 확인
-
-### ACK 타임아웃
-- `processMessages()` 주기 확인
-- 구독 토픽 일치 확인
-- 시리얼 버퍼 오버플로우 확인
-
----
-
-## 12. 종료
+## 4. 종료
 
 ### 라즈베리파이
 ```
@@ -545,10 +299,6 @@ loop 종료
   ↓
 프로그램 종료
 ```
-
-### 아두이노
-- 전원 OFF 또는 리셋
-- loop()는 계속 실행됨
 
 ---
 
