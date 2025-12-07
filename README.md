@@ -7,6 +7,12 @@
 전체 타임라인을 확인하면, 실행 순서 파악 가능.
 
 motor.ino 코드의 processMessages()의 시작 지점의 Serial2 대신에 DWM으로 받아온 recvBuffer 데이터로 바꾸면 될 것 같음.
+보내는 것도 마찬가지로, 
+publish()안에
+// Serial2로 전송
+  Serial2.write(buffer, pos);
+
+  해당 부분을 변경하면 될 것 같음.
 
 ## 프로토콜 구조
 
