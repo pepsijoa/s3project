@@ -1,7 +1,11 @@
-/*
- * UART 기반 Pub/Sub 시스템 - 아두이노 클라이언트
- * 라즈베리파이와 동일한 프로토콜 사용
+#include <HardwareSerial.h>
+
+/* * ESP32 UART 설정
+ * UART0: USB 디버깅용 (Serial)
+ * UART2: 외부 장치 통신용 (Serial2) - RX: GPIO16, TX: GPIO17 (기본값, 변경 가능)
  */
+#define RXD2 16
+#define TXD2 17
 
 // 메시지 타입
 enum MessageType {
@@ -20,66 +24,70 @@ enum QoS {
 };
 
 // 프로토콜 상수
-const byte START_BYTE = 0x7E;
-const byte END_BYTE = 0x7F;
+const uint8_t START_BYTE = 0x7E;
+const uint8_t END_BYTE = 0x7F;
 
 // 메시지 ID 관리
 uint16_t nextMessageId = 1;
 
 // 수신 버퍼
-byte recvBuffer[512];
+uint8_t recvBuffer[1024]; // ESP32의 넉넉한 RAM 활용
 int recvBufferLen = 0;
 
-// 구독 토픽 관리 (최대 5개)
-String subscribedTopics[5];
+// 구독 토픽 관리 (최대 10개로 확장)
+String subscribedTopics[10];
 int subscribedCount = 0;
 
+// 타이머 관리 변수
+unsigned long lastPublish = 0;
+
 void setup() {
-  Serial.begin(9600);
+  // 디버깅용 시리얼
+  Serial.begin(115200);
   
-  // 시리얼 버퍼 초기화
-  while(Serial.available() > 0) {
-    Serial.read();
-  }
+  // 통신용 시리얼 (UART2 사용)
+  // ESP32의 IO MUX 기능을 통해 핀 재할당 가능
+  Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
   
-  delay(100);
-  
+  Serial.println("[ESP32] System Started");
+
   // 토픽 구독 설정
   subscribe("sensor/temperature");
   subscribe("sensor/humidity");
   subscribe("command/led");
   
-  pinMode(LED_BUILTIN, OUTPUT);
+  // ESP32 내장 LED (보드마다 다를 수 있음, 보통 2번)
+  pinMode(2, OUTPUT); 
 }
 
 void loop() {
-  // 메시지 수신 처리
+  // 메시지 수신 처리 (Non-blocking)
   processMessages();
   
-  // 5초마다 상태 메시지 발행
-  static unsigned long lastPublish = 0;
-  if (millis() - lastPublish > 5000) {
-    // 아두이노 상태 전송
-    byte status[] = {0x01};  // 정상 동작
-    publish("arduino/status", status, 1);
-    
-    delay(100);
+  // 5초마다 상태 메시지 발행 (Non-blocking)
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastPublish > 5000) {
+    // 상태 전송
+    uint8_t status[] = {0x01};  // 정상 동작
+    publish("esp32/status", status, 1);
     
     // 센서 데이터 전송 (예제)
-    String tempStr = "Arduino: 23C";
+    // ESP32는 내부 홀 센서나 온도 센서가 있으나(TRM 31장), 여기서는 더미 데이터 전송
+    String tempStr = "ESP32: 25.5C";
     publish("sensor/temperature", tempStr);
     
-    lastPublish = millis();
+    lastPublish = currentMillis;
   }
   
-  delay(100);
+  // delay() 제거: ESP32의 멀티태스킹 효율성을 위해 사용하지 않음
 }
 
 // ========== 구독 관리 ==========
 
 void subscribe(String topic) {
-  if (subscribedCount < 5) {
+  if (subscribedCount < 10) {
     subscribedTopics[subscribedCount++] = topic;
+    Serial.printf("[Subscribe] Added: %s\n", topic.c_str());
   }
 }
 
@@ -92,74 +100,75 @@ bool isSubscribed(String topic) {
   return false;
 }
 
+// ========== CRC16-CCITT ==========
+// 함수 원형 선언
+uint16_t calculateCRC16(uint8_t* data, int len);
+
 // ========== 메시지 발행 ==========
 
-void publish(String topic, byte* payload, int payloadLen) {
+void publish(String topic, uint8_t* payload, int payloadLen) {
   uint16_t msgId = nextMessageId++;
   if (nextMessageId == 0) nextMessageId = 1;
   
   // 메시지 직렬화
   int bufferSize = 11 + topic.length() + payloadLen;
-  byte* buffer = (byte*)malloc(bufferSize);
+  uint8_t* buffer = (uint8_t*)malloc(bufferSize);
+  
+  if (!buffer) {
+    Serial.println("[Error] Memory allocation failed");
+    return;
+  }
+
   int pos = 0;
   
-  // START
   buffer[pos++] = START_BYTE;
-  
-  // TYPE
   buffer[pos++] = PUBLISH;
-  
-  // MESSAGE_ID (Big Endian)
   buffer[pos++] = (msgId >> 8) & 0xFF;
   buffer[pos++] = msgId & 0xFF;
-  
-  // QoS
   buffer[pos++] = AT_LEAST_ONCE;
+  buffer[pos++] = (uint8_t)topic.length();
   
-  // TOPIC_LEN
-  buffer[pos++] = topic.length();
-  
-  // TOPIC
   for (int i = 0; i < topic.length(); i++) {
-    buffer[pos++] = topic[i];
+    buffer[pos++] = (uint8_t)topic[i];
   }
   
-  // PAYLOAD_LEN (Big Endian)
+  // Payload Len (2bytes)
   buffer[pos++] = (payloadLen >> 8) & 0xFF;
   buffer[pos++] = payloadLen & 0xFF;
   
-  // PAYLOAD
   for (int i = 0; i < payloadLen; i++) {
     buffer[pos++] = payload[i];
   }
   
-  // CRC16 계산 (START 제외)
   uint16_t crc = calculateCRC16(buffer + 1, pos - 1);
   buffer[pos++] = (crc >> 8) & 0xFF;
   buffer[pos++] = crc & 0xFF;
   
-  // END
   buffer[pos++] = END_BYTE;
   
-  // 전송
-  Serial.write(buffer, pos);
+  // Serial2로 전송
+  Serial2.write(buffer, pos);
   
   free(buffer);
 }
 
 void publish(String topic, String payload) {
-  publish(topic, (byte*)payload.c_str(), payload.length());
+  publish(topic, (uint8_t*)payload.c_str(), payload.length());
 }
 
 // ========== 메시지 수신 처리 ==========
 
+// 함수 원형 선언
+void handlePublish(uint16_t msgId, uint8_t qos, String topic, uint8_t* payload, int len);
+void handleAck(uint16_t msgId);
+void sendAck(uint16_t msgId);
+
 void processMessages() {
-  // UART 데이터 읽기
-  while (Serial.available() > 0 && recvBufferLen < 512) {
-    recvBuffer[recvBufferLen++] = Serial.read();
+  // Serial2에서 데이터 읽기
+  while (Serial2.available() > 0 && recvBufferLen < 1024) {
+    recvBuffer[recvBufferLen++] = Serial2.read();
   }
   
-  // START 바이트 찾기
   while (recvBufferLen > 0) {
     int startPos = -1;
     for (int i = 0; i < recvBufferLen; i++) {
@@ -170,22 +179,17 @@ void processMessages() {
     }
     
     if (startPos == -1) {
-      recvBufferLen = 0;  // START 없음
+      recvBufferLen = 0;
       break;
     }
     
-    // START 이전 데이터 제거
     if (startPos > 0) {
       memmove(recvBuffer, recvBuffer + startPos, recvBufferLen - startPos);
       recvBufferLen -= startPos;
     }
     
-    // 최소 크기 확인
-    if (recvBufferLen < 11) {
-      break;  // 더 많은 데이터 필요
-    }
+    if (recvBufferLen < 11) break;
     
-    // END 바이트 찾기
     int endPos = -1;
     for (int i = 1; i < recvBufferLen; i++) {
       if (recvBuffer[i] == END_BYTE) {
@@ -195,20 +199,12 @@ void processMessages() {
     }
     
     if (endPos == -1) {
-      if (recvBufferLen > 400) {
-        recvBufferLen = 0;  // 버퍼 오버플로우 방지
-      }
-      break;  // 더 많은 데이터 필요
+      if (recvBufferLen > 1000) recvBufferLen = 0; // 버퍼 리셋
+      break;
     }
     
-    // 메시지 파싱
-    if (parseMessage(recvBuffer, endPos + 1)) {
-      // 성공
-    } else {
-      // 실패
-    }
+    parseMessage(recvBuffer, endPos + 1);
     
-    // 처리한 메시지 제거
     int remainLen = recvBufferLen - (endPos + 1);
     if (remainLen > 0) {
       memmove(recvBuffer, recvBuffer + endPos + 1, remainLen);
@@ -217,55 +213,41 @@ void processMessages() {
   }
 }
 
-bool parseMessage(byte* data, int len) {
-  int pos = 1;  // START 건너뛰기
+
+bool parseMessage(uint8_t* data, int len) {
+  int pos = 1; 
   
-  // TYPE
-  byte msgType = data[pos++];
+  uint8_t msgType = data[pos++];
   
-  // MESSAGE_ID
   uint16_t msgId = (data[pos] << 8) | data[pos + 1];
   pos += 2;
   
-  // QoS
-  byte qos = data[pos++];
-  
-  // TOPIC_LEN
-  byte topicLen = data[pos++];
+  uint8_t qos = data[pos++];
+  uint8_t topicLen = data[pos++];
   
   if (pos + topicLen + 2 > len) return false;
   
-  // TOPIC
   String topic = "";
   for (int i = 0; i < topicLen; i++) {
     topic += (char)data[pos++];
   }
   
-  // PAYLOAD_LEN
   uint16_t payloadLen = (data[pos] << 8) | data[pos + 1];
   pos += 2;
   
   if (pos + payloadLen + 3 > len) return false;
   
-  // PAYLOAD
-  byte* payload = data + pos;
+  uint8_t* payload = data + pos;
   pos += payloadLen;
   
-  // CRC 확인
   uint16_t receivedCRC = (data[pos] << 8) | data[pos + 1];
   uint16_t calculatedCRC = calculateCRC16(data + 1, pos - 1);
-  pos += 2;
   
   if (receivedCRC != calculatedCRC) {
-    return false;  // CRC 불일치
+    Serial.println("[Error] CRC mismatch");
+    return false; 
   }
   
-  // END 확인
-  if (data[pos] != END_BYTE) {
-    return false;
-  }
-  
-  // 메시지 타입 처리
   if (msgType == PUBLISH) {
     handlePublish(msgId, qos, topic, payload, payloadLen);
   } else if (msgType == ACK) {
@@ -275,58 +257,35 @@ bool parseMessage(byte* data, int len) {
   return true;
 }
 
-void handlePublish(uint16_t msgId, byte qos, String topic, byte* payload, int len) {
-  // 구독 여부 확인
-  if (!isSubscribed(topic)) {
-    return;
-  }
+void handlePublish(uint16_t msgId, uint8_t qos, String topic, uint8_t* payload, int len) {
+  if (!isSubscribed(topic)) return;
   
-  // QoS 1이면 ACK 전송
   if (qos == AT_LEAST_ONCE) {
     sendAck(msgId);
   }
   
-  // 메시지 처리
-  if (topic == "sensor/temperature") {
-    // 온도 데이터 수신 (디버그 출력 비활성화)
-    // Serial.print("[Arduino] 온도 데이터 수신: ");
-    // for (int i = 0; i < len; i++) {
-    //   Serial.print(payload[i]);
-    //   Serial.print(" ");
-    // }
-    // Serial.println();
-  }
-  else if (topic == "sensor/humidity") {
-    // 습도 데이터 수신 (디버그 출력 비활성화)
-    // String data = "";
-    // for (int i = 0; i < len; i++) {
-    //   data += (char)payload[i];
-    // }
-    // Serial.print("[Arduino] 습도 데이터 수신: ");
-    // Serial.println(data);
-  }
-  else if (topic == "command/led") {
-    // LED 제어
+  if (topic == "command/led") {
     if (len > 0) {
-      if (payload[0]) {
-        digitalWrite(LED_BUILTIN, HIGH);
-        // Serial.println("[Arduino] LED ON");
+      if (payload[0] == '1' || payload[0] == 1) {
+        digitalWrite(2, HIGH); // ESP32 Builtin LED
+        Serial.println("[CMD] LED ON");
       } else {
-        digitalWrite(LED_BUILTIN, LOW);
-        // Serial.println("[Arduino] LED OFF");
+        digitalWrite(2, LOW);
+        Serial.println("[CMD] LED OFF");
       }
     }
+  } else {
+    // 디버깅용: 수신된 페이로드 출력
+    Serial.printf("[Recv] Topic: %s, Payload Len: %d\n", topic.c_str(), len);
   }
 }
 
 void handleAck(uint16_t msgId) {
-  // ACK 수신 (디버그 출력 비활성화)
-  // Serial.print("[Arduino] ACK 수신: 메시지 ID ");
-  // Serial.println(msgId);
+  Serial.printf("[ACK] Message ID: %d\n", msgId);
 }
 
 void sendAck(uint16_t msgId) {
-  byte buffer[11];
+  uint8_t buffer[11];
   int pos = 0;
   
   buffer[pos++] = START_BYTE;
@@ -334,33 +293,26 @@ void sendAck(uint16_t msgId) {
   buffer[pos++] = (msgId >> 8) & 0xFF;
   buffer[pos++] = msgId & 0xFF;
   buffer[pos++] = AT_MOST_ONCE;
-  buffer[pos++] = 0;  // topic len = 0
-  buffer[pos++] = 0;  // payload len high
-  buffer[pos++] = 0;  // payload len low
+  buffer[pos++] = 0; // topic len
+  buffer[pos++] = 0; // payload len high
+  buffer[pos++] = 0; // payload len low
   
   uint16_t crc = calculateCRC16(buffer + 1, pos - 1);
   buffer[pos++] = (crc >> 8) & 0xFF;
   buffer[pos++] = crc & 0xFF;
   buffer[pos++] = END_BYTE;
   
-  Serial.write(buffer, pos);
+  Serial2.write(buffer, pos);
 }
 
-// ========== CRC16-CCITT ==========
-
-uint16_t calculateCRC16(byte* data, int len) {
+uint16_t calculateCRC16(uint8_t* data, int len) {
   uint16_t crc = 0xFFFF;
-  
   for (int i = 0; i < len; i++) {
     crc ^= (uint16_t)data[i] << 8;
     for (int j = 0; j < 8; j++) {
-      if (crc & 0x8000) {
-        crc = (crc << 1) ^ 0x1021;
-      } else {
-        crc = crc << 1;
-      }
+      if (crc & 0x8000) crc = (crc << 1) ^ 0x1021;
+      else crc = crc << 1;
     }
   }
-  
   return crc;
 }
