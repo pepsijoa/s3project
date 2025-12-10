@@ -8,6 +8,11 @@
 
 #include <HardwareSerial.h>
 
+
+#include <DW1000Ng.hpp>
+#include <SPI.h>
+
+
 // ==========================================
 // 1. Wi-Fi 설정 
 // ==========================================
@@ -21,9 +26,6 @@ const char* password = "kTw2530!"; // 와이파이 비밀번호
 #define PIN_AIN1 12
 #define PIN_AIN2 13
 #define PIN_STBY 14
-
-#define RXD2 16
-#define TXD2 17
 
 #define PWM_FREQ 20000
 #define PWM_UNIT MCPWM_UNIT_0
@@ -45,13 +47,34 @@ enum QoS {
   EXACTLY_ONCE = 2
 };
 
+//DWM RECV/SEND 정보
+device_configuration_t DEFAULT_CONFIG = {
+    false,
+    true,
+    true,
+    true,
+    false,
+    SFDMode::STANDARD_SFD,
+    Channel::CHANNEL_5,
+    DataRate::RATE_850KBPS,
+    PulseFrequency::FREQ_16MHZ,
+    PreambleLength::LEN_256,
+    PreambleCode::CODE_3
+};
 
-// ==========================================
-// 3. 전역 변수 및 서버 객체
-// ==========================================
+// FSM: 제어 모드 정의
+enum ControlMode {
+  HTTP_CONTROL = 0,  // HTTP(웹)에서 제어
+  MQTT_CONTROL = 1   // MQTT(DWM)에서 제어
+};
+
 WebServer server(80);
 float currentSpeed = 0.0; // 현재 속도 (0.0 ~ 100.0)
+float targetSpeed = 0.0;
+const float acceleration = 2.5; // 속도 변화량
+
 bool currentDirection = true; // 방향 (true: 정회전, false: 역회전)
+ControlMode controlMode = HTTP_CONTROL; // 초기 상태: HTTP 제어
 
 const uint8_t START_BYTE = 0x7E;
 const uint8_t END_BYTE = 0x7F;
@@ -67,6 +90,18 @@ int subscribedCount = 0;
 unsigned long lastPublish = 0;
 
 uint8_t txBuffer[256];
+
+int16_t numReceived = 0;
+String message;
+
+
+// ========== 함수 원형 선언 ==========
+uint16_t calculateCRC16(uint8_t* data, int len);
+bool parseMessage(uint8_t* data, int len);
+void handlePublish(uint16_t msgId, uint8_t qos, String topic, uint8_t* payload, int len);
+void handleAck(uint16_t msgId);
+void sendAck(uint16_t msgId);
+
 // ==========================================
 // 4. 모터 제어 함수 (제공해주신 코드)
 // ==========================================
@@ -94,6 +129,32 @@ void initMotor() {
   pwm_config.duty_mode = MCPWM_DUTY_MODE_0;
   
   mcpwm_init(PWM_UNIT, PWM_TIMER, &pwm_config);
+}
+
+void setTargetSpeed(float speed, ControlMode requiredMode) {
+  if (controlMode == requiredMode) {
+    targetSpeed = speed;
+    Serial.printf("[Speed] Set to %.1f (Mode: %s)\n", speed, 
+                  requiredMode == HTTP_CONTROL ? "HTTP" : "MQTT");
+  } else {
+    Serial.printf("[Speed] IGNORED - Current mode: %s, Request from: %s\n",
+                  controlMode == HTTP_CONTROL ? "HTTP" : "MQTT",
+                  requiredMode == HTTP_CONTROL ? "HTTP" : "MQTT");
+  }
+}
+
+void updateMotorSpeed(bool direction)
+{
+  if (abs(currentSpeed - targetSpeed) > 0.1) {
+    if (currentSpeed < targetSpeed) {
+      currentSpeed += acceleration; // 가속
+      if (currentSpeed > targetSpeed) currentSpeed = targetSpeed;
+    } else {
+      currentSpeed -= acceleration; // 감속
+      if (currentSpeed < targetSpeed) currentSpeed = targetSpeed;
+    }
+    setMotor(abs(currentSpeed), direction); 
+  }
 }
 
 void setMotor(float speed, bool direction) {
@@ -145,28 +206,40 @@ void handleRoot() {
 }
 
 // 속도 증가 요청 처리
-void handleSpeedUp() {
+void handleSpeedUp() 
+{
+  if (controlMode != HTTP_CONTROL) {
+    server.send(403, "text/plain", "MQTT Control Mode Active");
+    Serial.println("[HTTP] Speed UP BLOCKED - MQTT mode active");
+    return;
+  }
+  
   currentSpeed += 10.0;
   if (currentSpeed > 100.0) currentSpeed = 100.0;
   
-  setMotor(currentSpeed, currentDirection);
+  setTargetSpeed(currentSpeed, HTTP_CONTROL);
   Serial.println("Speed UP: " + String(currentSpeed));
   server.send(200, "text/plain", String((int)currentSpeed));
 }
 
 // 속도 감소 요청 처리
 void handleSpeedDown() {
+  if (controlMode != HTTP_CONTROL) {
+    server.send(403, "text/plain", "MQTT Control Mode Active");
+    Serial.println("[HTTP] Speed DOWN BLOCKED - MQTT mode active");
+    return;
+  }
+  
   currentSpeed -= 10.0;
   if (currentSpeed < 0.0) currentSpeed = 0.0;
   
-  setMotor(currentSpeed, currentDirection);
+  setTargetSpeed(currentSpeed, HTTP_CONTROL);
   Serial.println("Speed DOWN: " + String(currentSpeed));
   server.send(200, "text/plain", String((int)currentSpeed));
 }
 
 // ==========================================
 // mqtt source
-
 // ========== 구독 관리 ==========
 
 void subscribe(String topic) {
@@ -186,10 +259,6 @@ bool isSubscribed(String topic) {
 }
 
 
-// ========== CRC16-CCITT ==========
-// 함수 원형 선언
-uint16_t calculateCRC16(uint8_t* data, int len);
-
 // ========== 메시지 발행 ==========
 
 void publish(String topic, uint8_t* payload, int payloadLen) {
@@ -204,7 +273,7 @@ void publish(String topic, uint8_t* payload, int payloadLen) {
     return;
   }
 
-  uint8_t* buffer = txbuffer;
+  uint8_t* buffer = txBuffer;
   
   if (buffer == NULL) {
     Serial.println("[Error] Memory allocation failed");
@@ -239,7 +308,7 @@ void publish(String topic, uint8_t* payload, int payloadLen) {
   buffer[pos++] = END_BYTE;
   
   // Serial2로 전송
-  Serial2.write(buffer, pos);
+  //Serial2.write(buffer, pos);
 }
 
 void publish(String topic, String payload) {
@@ -248,16 +317,31 @@ void publish(String topic, String payload) {
 
 // ========== 메시지 수신 처리 ==========
 
-void handlePublish(uint16_t msgId, uint8_t qos, String topic, uint8_t* payload, int len);
-void handleAck(uint16_t msgId);
-void sendAck(uint16_t msgId);
 
 void processMessages() {
   // Serial2에서 데이터 읽기
-  while (Serial2.available() > 0 && recvBufferLen < 1024) {
-    recvBuffer[recvBufferLen++] = Serial2.read();
+  // while (Serial2.available() > 0 && recvBufferLen < 1024) {
+  //   recvBuffer[recvBufferLen++] = Serial2.read();
+  // }
+
+  DW1000Ng::startReceive();
+  while(!DW1000Ng::isReceiveDone()) {
+    delay(1); // Watchdog Timer 리셋을 위해 필수
   }
   
+  DW1000Ng::clearReceiveStatus();
+  numReceived++;
+  DW1000Ng::getReceivedData(message);
+
+  // String message를 recvBuffer에 추가
+  int msgLen = message.length();
+  if (recvBufferLen + msgLen <= sizeof(recvBuffer)) {
+    memcpy(recvBuffer + recvBufferLen, message.c_str(), msgLen);
+    recvBufferLen += msgLen;
+  } else {
+    Serial.println("[Error] Recv Buffer Overflow");
+  }
+
   while (recvBufferLen > 0) {
     int startPos = -1;
     for (int i = 0; i < recvBufferLen; i++) {
@@ -353,7 +437,18 @@ void handlePublish(uint16_t msgId, uint8_t qos, String topic, uint8_t* payload, 
     sendAck(msgId);
   }
   
-  if (topic == "command/led") {
+  if (topic == "command/controlled") {
+    if (len > 0) {
+      if (payload[0] == '1' || payload[0] == 1) {
+        controlMode = MQTT_CONTROL;
+        Serial.println("[FSM] Mode: MQTT_CONTROL (HTTP BLOCKED)");
+      } else {
+        controlMode = HTTP_CONTROL;
+        Serial.println("[FSM] Mode: HTTP_CONTROL (HTTP ENABLED)");
+      }
+    }
+  }
+  else if (topic == "command/led") {
     if (len > 0) {
       if (payload[0] == '1' || payload[0] == 1) {
         digitalWrite(2, HIGH); // ESP32 Builtin LED
@@ -363,7 +458,25 @@ void handlePublish(uint16_t msgId, uint8_t qos, String topic, uint8_t* payload, 
         Serial.println("[CMD] LED OFF");
       }
     }
-  } else {
+  }
+  else if (topic == "command/motor") {
+    if (len > 0) {
+      // payload를 null-terminated string으로 변환
+      char buffer[32];
+      int copyLen = (len < 31) ? len : 31;
+      memcpy(buffer, payload, copyLen);
+      buffer[copyLen] = '\0';
+      
+      float speed = atof(buffer); // 문자열을 float으로 변환
+      
+      // 속도 범위 검증 (0.0 ~ 100.0)
+      if (speed < 0.0) speed = 0.0;
+      if (speed > 100.0) speed = 100.0;
+      
+      setTargetSpeed(speed, MQTT_CONTROL);
+    }
+  }
+  else {
     // 디버깅용: 수신된 페이로드 출력
     Serial.printf("[Recv] Topic: %s, Payload Len: %d\n", topic.c_str(), len);
   }
@@ -391,7 +504,7 @@ void sendAck(uint16_t msgId) {
   buffer[pos++] = crc & 0xFF;
   buffer[pos++] = END_BYTE;
   
-  Serial2.write(buffer, pos);
+  // Serial2.write(buffer, pos);
 }
 
 uint16_t calculateCRC16(uint8_t* data, int len) {
@@ -408,12 +521,42 @@ uint16_t calculateCRC16(uint8_t* data, int len) {
 
 void setup() {
   Serial.begin(115200);
-  Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
 
-  // 내장 LED 핀 모드 설정
-  pinMode(2, OUTPUT); 
+  //핀 모드 설정, 5 is Inner LED
+  pinMode(5, OUTPUT); 
+  pinMode(PIN_IRQ, INPUT); 
+  // SPI 및 핀 설정
+  SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_SS);
 
+  // DW1000 초기화
+  pinMode(PIN_RST, OUTPUT);
+  digitalWrite(PIN_RST, LOW);
+  delay(10);
+  digitalWrite(PIN_RST, HIGH);
+  delay(10);
 
+  DW1000Ng::initializeNoInterrupt(PIN_SS);
+
+  DW1000Ng::applyConfiguration(DEFAULT_CONFIG);
+  
+  DW1000Ng::setDeviceAddress(6); // 수신기 주소
+  DW1000Ng::setNetworkId(10);    // 네트워크 ID
+
+  DW1000Ng::setAntennaDelay(16436);
+  Serial.println(F("Committed configuration ..."));
+
+  // DWM 확인
+  char msg[128];
+  DW1000Ng::getPrintableDeviceIdentifier(msg);
+  Serial.print("Device ID: "); Serial.println(msg);
+  DW1000Ng::getPrintableExtendedUniqueIdentifier(msg);
+  Serial.print("Unique ID: "); Serial.println(msg);
+  DW1000Ng::getPrintableNetworkIdAndShortAddress(msg);
+  Serial.print("Network ID & Device Address: "); Serial.println(msg);
+  DW1000Ng::getPrintableDeviceMode(msg);
+  Serial.print("Device mode: "); Serial.println(msg);
+
+  ////////////////////////////////////
   // 모터 초기화
   initMotor();
   setMotor(0, true); // 초기 정지 상태
@@ -442,7 +585,9 @@ void setup() {
   Serial.println("Web server started");
 
   // MQTT 구독
+  subscribe("command/controlled");
   subscribe("command/led");
+  subscribe("command/motor");
 
 
 }
@@ -452,4 +597,8 @@ void loop() {
 
   // 메시지 수신 처리 (Non-blocking)
   processMessages();
+
+  // 모터 속도 업데이트
+  updateMotorSpeed(currentDirection);
+
 }
