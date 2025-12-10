@@ -22,6 +22,14 @@ const char* password = "kTw2530!"; // 와이파이 비밀번호
 // ==========================================
 // 2. 핀 및 상수 정의 (제공해주신 코드 기반)
 // ==========================================
+
+const uint8_t PIN_SCK = 18;
+const uint8_t PIN_MISO = 19;
+const uint8_t PIN_MOSI = 23;
+const uint8_t PIN_SS = 5;
+const uint8_t PIN_RST = 16; // 리셋 핀 (사용자 설정)
+const uint8_t PIN_IRQ = 4;  // 인터럽트 핀
+
 #define PIN_PWMA 15
 #define PIN_AIN1 12
 #define PIN_AIN2 13
